@@ -12,9 +12,6 @@ pub async fn load() {
       return;
     }
   };
-
-  let length = file_contents.len();
-  println!("{length}");
 }
 
 pub struct Header {
@@ -44,6 +41,12 @@ impl Header {
   }
 }
 
+struct Model {
+  header: Header,
+  config: ModelConfig,
+  tensor_info: Vec<TensorInfo>,
+}
+
 #[derive(Debug)]
 struct ModelConfig {
   pub arch: String,
@@ -52,7 +55,16 @@ struct ModelConfig {
   pub metadata: HashMap<String, super::reader::GgufValue>
 }
 
-async fn open_file() -> Result<Vec<u8>, Error> {
+#[derive(Debug)]
+struct TensorInfo {
+  name: String,
+  n_dims: u32,
+  dims: Vec<u64>,
+  dtype: u32,
+  offset: u64
+}
+
+async fn open_file() -> Result<Model, Error> {
   let file = File::open("models/tinyllama.gguf").await?;
 
   let mut gguf_reader = GgufReader::new(file);
@@ -62,9 +74,28 @@ async fn open_file() -> Result<Vec<u8>, Error> {
   println!("Tensor count: {}", header.tensor_count);
   println!("KV count: {}", header.kv_count);
 
-  read_kv(header.kv_count, &mut gguf_reader).await?;
+  let config = read_kv(header.kv_count, &mut gguf_reader).await?;
 
-  Ok(vec![])
+  let mut tensor_info: Vec<TensorInfo> = Vec::new();
+
+  for _ in 0..header.tensor_count {
+    let tensor = read_tensors(&mut gguf_reader).await?;
+    tensor_info.push(tensor);
+  }
+
+  // Move the file pointer to the nearest 32-byte position ahead of where we are now
+  let file_position = gguf_reader.get_position().await?;
+  let tensor_start_position = ((file_position as f64 / 32.0).ceil() * 32.0) as u64;
+  let file_pointer_movement = tensor_start_position - file_position;
+  gguf_reader.move_file_pointer(file_pointer_movement as i64).await?;
+
+  
+
+  Ok(Model {
+   header,
+   config,
+    tensor_info
+  })
 }
 
 async fn read_kv(count: u64, gguf_reader: &mut GgufReader) -> Result<ModelConfig, Error> {
@@ -73,20 +104,15 @@ async fn read_kv(count: u64, gguf_reader: &mut GgufReader) -> Result<ModelConfig
   let mut embedding_length: Option<u32> = None;
   let mut metadata: HashMap<String, GgufValue> = HashMap::new();
 
-  for k in 0..count {
-    //println!("key index = {}", k);
-    
+  for _ in 0..count {    
     let key = gguf_reader.read_utf8().await?;
     println!("key = {}", key);
 
     let value_type = gguf_reader.read_u32().await?;
     println!("value_type = {}", value_type);
 
-    let value = gguf_reader.get_value(value_type).await?;
-    
-    if k != 17 && k != 16 && k != 15 {
-      println!("value = {:?}", value);
-    }
+    let value = gguf_reader.get_gguf_value(value_type).await?;
+    //println!("{:?}", value);
 
     if key.as_str() == "general.architecture" {
       if let GgufValue::String(s) = value {
@@ -129,7 +155,70 @@ async fn read_kv(count: u64, gguf_reader: &mut GgufReader) -> Result<ModelConfig
     metadata
   };
 
-  println!("{:?}", config);
+  //println!("{:?}", config);
 
   Ok(config)
+}
+
+enum GgmlType {
+  GgmlTypeF32     = 0,
+  GgmlTypeF16     = 1,
+  GgmlTypeQ4_0  = 2,
+  GgmlTypeQ4_1    = 3,
+  // GGML_TYPE_Q4_2 = 4, support has been removed
+  // GGML_TYPE_Q4_3 = 5, support has been removed
+  GgmlTypeQ5_0    = 6,
+  GgmlTypeQ5_1    = 7,
+  GgmlTypeQ8_0    = 8,
+  GgmlTypeQ8_1    = 9,
+  GgmlTypeQ2K    = 10,
+  GgmlTypeQ3K    = 11,
+  GgmlTypeQ4K    = 12,
+  GgmlTypeQ5K    = 13,
+  GgmlTypeQ6K    = 14,
+  GgmlTypeQ8K    = 15,
+  GgmlTypeIq2Xxs = 16,
+  GgmlTypeIq2Xs  = 17,
+  GgmlTypeIq3Xxs = 18,
+  GgmlTypeIq1S   = 19,
+  GgmlTypeIq4Nl  = 20,
+  GgmlTypeIq3S   = 21,
+  GgmlTypeIq2S   = 22,
+  GgmlTypeIq4Xs  = 23,
+  GgmlTypeI8      = 24,
+  GgmlTypeI16     = 25,
+  GgmlTypeI32     = 26,
+  GgmlTypeI64     = 27,
+  GgmlTypeF64     = 28,
+  GgmlTypeIq1M   = 29,
+  GgmlTypeBf16    = 30,
+  // GGML_TYPE_Q4_0_4_4 = 31, support has been removed from gguf files
+  // GGML_TYPE_Q4_0_4_8 = 32,
+  // GGML_TYPE_Q4_0_8_8 = 33,
+  GgmlTypeTq1_0   = 34,
+  GgmlTypeTq2_0   = 35,
+  // GGML_TYPE_IQ4_NL_4_4 = 36,
+  // GGML_TYPE_IQ4_NL_4_8 = 37,
+  // GGML_TYPE_IQ4_NL_8_8 = 38,
+  GgmlTypeMxfp4   = 39, // MXFP4 (1 block)
+  GgmlTypeCount   = 40,
+}
+
+async fn read_tensors(gguf_reader: &mut GgufReader) -> Result<TensorInfo, Error> {
+  let tensor_name = gguf_reader.read_utf8().await?;
+
+  println!("Tensor = {}", tensor_name);
+  let n_dims = gguf_reader.read_u32().await?;
+  println!("n_dims = {}", n_dims);
+  let mut dims = Vec::with_capacity(n_dims.try_into().unwrap());
+  for _ in 0..n_dims {
+    dims.push(gguf_reader.read_u64().await?);
+  }
+  println!("dims = {:?}", dims);
+  let dtype = gguf_reader.read_u32().await?;
+  println!("dtype = {}", dtype);
+  let offset = gguf_reader.read_u64().await?;
+  println!("offset = {}", offset);
+
+  Ok(TensorInfo { name: tensor_name, n_dims, dims, dtype, offset })
 }

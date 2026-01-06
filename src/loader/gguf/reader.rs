@@ -1,6 +1,6 @@
-use std::{io::{Error, ErrorKind}, pin::Pin};
+use std::{io::{Error, ErrorKind, SeekFrom}, pin::Pin};
 
-use tokio::{fs::File, io::AsyncReadExt};
+use tokio::{fs::File, io::{AsyncReadExt, AsyncSeekExt}};
 
 #[derive(Debug, Clone)]
 pub enum GgufValue {
@@ -28,6 +28,10 @@ impl GgufReader {
     Self {
       file
     }
+  }
+
+  pub async fn get_position(&mut self) -> Result<u64, Error> {
+    self.file.stream_position().await
   }
 
   pub async fn read_u32(&mut self) -> Result<u32, Error> {
@@ -61,6 +65,11 @@ impl GgufReader {
       .map_err(|_| Error::new(ErrorKind::InvalidData, "invalid utf8"))
   }
 
+  pub async fn move_file_pointer(&mut self, movement: i64) -> Result<(), Error> {
+    self.file.seek(SeekFrom::Current(movement)).await?;
+    Ok(())
+  }
+
   async fn read_fixed<const N: usize>(&mut self) -> Result<Vec<u8>, Error> {
     let mut buf = vec![0u8; N];
     self.file.read_exact(&mut buf).await?;
@@ -81,7 +90,7 @@ impl GgufReader {
       let mut items: Vec<GgufValue> = Vec::with_capacity(count);
 
       for _ in 0..count {
-        let element = self.get_value(elem_type).await?;
+        let element = self.get_gguf_value(elem_type).await?;
         items.push(element);
       }
 
@@ -89,7 +98,7 @@ impl GgufReader {
     })
   }
 
-  pub fn get_value(&mut self, value_type: u32) -> Pin<Box<dyn Future<Output = Result<GgufValue, Error>> + '_>> {
+  pub fn get_gguf_value(&mut self, value_type: u32) -> Pin<Box<dyn Future<Output = Result<GgufValue, Error>> + '_>> {
     Box::pin(async move {
       let value = match value_type {
         0 => { // GGUF_TYPE_UINT8
@@ -160,7 +169,7 @@ impl GgufReader {
             .map_err(|_| Error::new(ErrorKind::InvalidData, "array too large"))?;
           let mut items = Vec::with_capacity(count);
           for _ in 0..count {
-            let element = self.get_value(elem_type).await?;
+            let element = self.get_gguf_value(elem_type).await?;
             items.push(element);
           }
           GgufValue::Array(items)
