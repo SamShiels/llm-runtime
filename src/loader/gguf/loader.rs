@@ -1,7 +1,7 @@
-use core::num;
 // Implement function to load up a gguf file, and another to parse the result
-use std::{collections::HashMap, io::{Error, ErrorKind}, pin::Pin};
+use std::{collections::HashMap, io::{Error, ErrorKind}};
 use tokio::fs::File;
+use half::f16;
 
 use crate::loader::gguf::reader::{GgufReader, GgufValue};
 
@@ -134,7 +134,7 @@ pub struct Tensor {
 }
 
 async fn open_file() -> Result<Model, Error> {
-  let file = File::open("models/tinyllama.gguf").await?;
+  let file = File::open("models/LFM2.5-1.2B-Instruct-Q8_0.gguf").await?;
 
   let mut gguf_reader = GgufReader::new(file);
   let header = Header::new(&mut gguf_reader).await?;
@@ -152,17 +152,28 @@ async fn open_file() -> Result<Model, Error> {
     tensor_info.push(info);
   }
 
+  let alignment = config.metadata.get("general.alignment")
+    .and_then(|val| {
+      if let GgufValue::Uint32(u) = val { Some(*u as u64) } else { None }
+    })
+    .unwrap_or(32);
+
   // Move the file pointer to the nearest 32-byte position ahead of where we are now
   let file_position = gguf_reader.get_position().await?;
-  let tensor_start_position = ((file_position as f64 / 32.0).ceil() * 32.0) as u64;
+  let tensor_start_position = ((file_position as f64 / alignment as f64).ceil() * alignment as f64) as u64;
   let file_pointer_movement = tensor_start_position;
   gguf_reader.seek_pointer_absolute(file_pointer_movement).await?;
+
+  println!("alignment = {}", alignment);
+  println!("file_position (raw) = {}", file_position);
+  println!("tensor_start_position = {}", tensor_start_position);
+
 
   let mut tensors: Vec<Tensor> = Vec::new();
 
   for i in 0..header.tensor_count {
     let info = &tensor_info[i as usize];
-    let tensor = read_tensor(&mut gguf_reader, &info).await?;
+    let tensor = read_tensor(&mut gguf_reader, &info, &tensor_start_position).await?;
 
     tensors.push(tensor);
   }
@@ -256,27 +267,21 @@ async fn read_tensor_info(gguf_reader: &mut GgufReader) -> Result<TensorInfo, Er
   Ok(TensorInfo { name: tensor_name, n_dims, dims, dtype, offset })
 }
 
-// async fn read_block(gguf_reader: &mut GgufReader, dims: Vec<u64>, cur_dimension: u32, num_dimension: u32) -> Pin<Box<dyn Future<Output = Result<Q8_0Block, Error>> + '_>> {
-//   Box::pin(async move {
-//     let dimension_length = dims[cur_dimension];
-//     for i in 0..dimension_length {
-//       read_block(gguf_reader, dims, cur_dimension, num_dimension).await?;
-//     }
-//   })
-// }
-
-async fn read_tensor(gguf_reader: &mut GgufReader, info: &TensorInfo) -> Result<Tensor, Error> {
+async fn read_tensor(gguf_reader: &mut GgufReader, info: &TensorInfo, tensor_start_position: &u64) -> Result<Tensor, Error> {
   let num_elements: u64 = info.dims.iter().product();
-  let _ = gguf_reader.seek_pointer_absolute(info.offset).await;
+  let _ = gguf_reader.seek_pointer_absolute(tensor_start_position + info.offset).await;
 
   let num_bytes = match info.dtype {
       0 => num_elements * 4,
       8 => {
         let num_blocks = (num_elements + 31) / 32;
-        num_blocks * 36
+        num_blocks * 34
       }
       _ => panic!("Unsupported dtype: {}", info.dtype)
   };
+
+  println!("Loading tensor: {}, dtype={}, offset={}, num_bytes={}, seek_to={}", 
+    info.name, info.dtype, info.offset, num_bytes, tensor_start_position + info.offset);
 
   let data = gguf_reader.read_exact_vec(num_bytes as usize).await?;
 
@@ -286,7 +291,7 @@ async fn read_tensor(gguf_reader: &mut GgufReader, info: &TensorInfo) -> Result<
     _ => panic!("Unsupported dtype: {}", info.dtype)
   };
 
-  println!("{}", data.len());
+  println!("Loaded tensor: {}, {}", info.name, data.len());
 
   // Just assume it's Q8_0 for now. We will fill out more dtypes later
   
@@ -300,14 +305,14 @@ async fn read_tensor(gguf_reader: &mut GgufReader, info: &TensorInfo) -> Result<
       },
       8 => {
         let mut blocks: Vec<Q8_0Block> = Vec::new();
-        for chunk in data.chunks(36) {
+        for chunk in data.chunks(34) {
           let mut quantized = [0i8; 32];
 
           for (i, &byte) in chunk[0..32].iter().enumerate() {
             quantized[i] = byte as i8;
           }
-          let scale_bytes: [u8; 4] = chunk[32..36].try_into().unwrap();
-          let scale = f32::from_le_bytes(scale_bytes);
+          let scale_bytes: [u8; 2] = chunk[32..34].try_into().unwrap();
+          let scale = f16::from_le_bytes(scale_bytes).to_f32();
 
           let block = Q8_0Block {
             quantized_samples: quantized,
