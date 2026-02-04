@@ -50,16 +50,17 @@ enum GgmlType {
   GgmlTypeCount   = 40,
 }
 
-pub async fn load() {
-  let file_contents = match open_file().await {
-    Ok(bytes) => bytes,
-    Err(err) => {
-      print!("failed to open GGUF file: {err}");
-      return;
-    }
-  };
+pub async fn load() -> Result<Model, Error>{
+  // let file_contents = match open_file().await {
+  //   Ok(model) => model,
+  //   Err(err) => {
+  //     print!("failed to open GGUF file: {err}");
+  //   }
+  // }
 
-  println!("{:?}", file_contents.tensors);
+  // println!("{:?}", file_contents.tensors);
+
+  Ok(open_file().await?)
 }
 
 pub struct Header {
@@ -89,15 +90,15 @@ impl Header {
   }
 }
 
-struct Model {
-  header: Header,
-  config: ModelConfig,
-  tensor_info: Vec<TensorInfo>,
-  tensors: Vec<Tensor>
+pub struct Model {
+  pub header: Header,
+  pub config: ModelConfig,
+  pub tensor_info: Vec<TensorInfo>,
+  pub tensors: Vec<Tensor>
 }
 
 #[derive(Debug)]
-struct ModelConfig {
+pub struct ModelConfig {
   pub arch: String,
   pub context_length: u32,
   pub embedding_length: u32,
@@ -105,7 +106,7 @@ struct ModelConfig {
 }
 
 #[derive(Debug)]
-struct TensorInfo {
+pub struct TensorInfo {
   name: String,
   n_dims: u32,
   dims: Vec<u64>,
@@ -114,16 +115,22 @@ struct TensorInfo {
 }
 
 #[derive(Debug)]
-struct Q8_0Block {
+pub struct Q8_0Block {
   quantized_samples: [i8; 32],
   scale: f32,
 }
 
 #[derive(Debug)]
-struct Tensor {
+pub enum TensorData {
+  F32(Vec<f32>),
+  Q8_0(Vec<Q8_0Block>)
+}
+
+#[derive(Debug)]
+pub struct Tensor {
   ggml_type: GgmlType,
   dimensions: Vec<u64>,
-  blocks: Vec<Q8_0Block>
+  data: TensorData
 }
 
 async fn open_file() -> Result<Model, Error> {
@@ -283,24 +290,37 @@ async fn read_tensor(gguf_reader: &mut GgufReader, info: &TensorInfo) -> Result<
 
   // Just assume it's Q8_0 for now. We will fill out more dtypes later
   
-  let mut blocks: Vec<Q8_0Block> = Vec::new();
-  for chunk in data.chunks(36) {
+  let parsed_data = match info.dtype {
+      0 => {
+        let f32_data: Vec<f32> = data.chunks(4)
+          .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+          .collect();
 
-    let mut quantized = [0i8; 32];
+        TensorData::F32(f32_data)
+      },
+      8 => {
+        let mut blocks: Vec<Q8_0Block> = Vec::new();
+        for chunk in data.chunks(36) {
+          let mut quantized = [0i8; 32];
 
-    for (i, &byte) in chunk[0..32].iter().enumerate() {
-      quantized[i] = byte as i8;
-    }
-    let scale_bytes: [u8; 4] = chunk[32..36].try_into().unwrap();
-    let scale = f32::from_le_bytes(scale_bytes);
+          for (i, &byte) in chunk[0..32].iter().enumerate() {
+            quantized[i] = byte as i8;
+          }
+          let scale_bytes: [u8; 4] = chunk[32..36].try_into().unwrap();
+          let scale = f32::from_le_bytes(scale_bytes);
 
-    let block = Q8_0Block {
-      quantized_samples: quantized,
-      scale
-    };
+          let block = Q8_0Block {
+            quantized_samples: quantized,
+            scale
+          };
 
-    blocks.push(block);
-  }
+          blocks.push(block);
+        }
 
-  Ok(Tensor { ggml_type, dimensions: info.dims.clone(), blocks })
+        TensorData::Q8_0(blocks)
+      },
+      _ => panic!("Unsupported dtype: {}", info.dtype)
+  };
+
+  Ok(Tensor { ggml_type, dimensions: info.dims.clone(), data: parsed_data })
 }
