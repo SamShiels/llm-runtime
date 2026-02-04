@@ -34,6 +34,12 @@ impl GgufReader {
     self.file.stream_position().await
   }
 
+  pub async fn read_f32(&mut self) -> Result<f32, Error> {
+    let mut buffer = [0u8; 4];
+    self.file.read_exact(&mut buffer).await?;
+    Ok(f32::from_le_bytes(buffer))
+  }
+
   pub async fn read_u32(&mut self) -> Result<u32, Error> {
     let mut buffer = [0u8; 4];
     self.file.read_exact(&mut buffer).await?;
@@ -65,8 +71,13 @@ impl GgufReader {
       .map_err(|_| Error::new(ErrorKind::InvalidData, "invalid utf8"))
   }
 
-  pub async fn move_file_pointer(&mut self, movement: i64) -> Result<(), Error> {
+  pub async fn seek_pointer(&mut self, movement: i64) -> Result<(), Error> {
     self.file.seek(SeekFrom::Current(movement)).await?;
+    Ok(())
+  }
+
+  pub async fn seek_pointer_absolute(&mut self, position: u64) -> Result<(), Error> {
+    self.file.seek(SeekFrom::Start(position)).await?;
     Ok(())
   }
 
