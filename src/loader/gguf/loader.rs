@@ -164,11 +164,6 @@ async fn open_file() -> Result<Model, Error> {
   let file_pointer_movement = tensor_start_position;
   gguf_reader.seek_pointer_absolute(file_pointer_movement).await?;
 
-  println!("alignment = {}", alignment);
-  println!("file_position (raw) = {}", file_position);
-  println!("tensor_start_position = {}", tensor_start_position);
-
-
   let mut tensors: Vec<Tensor> = Vec::new();
 
   for i in 0..header.tensor_count {
@@ -243,26 +238,19 @@ async fn read_kv(count: u64, gguf_reader: &mut GgufReader) -> Result<ModelConfig
     metadata
   };
 
-  //println!("{:?}", config);
-
   Ok(config)
 }
 
 async fn read_tensor_info(gguf_reader: &mut GgufReader) -> Result<TensorInfo, Error> {
   let tensor_name = gguf_reader.read_utf8().await?;
 
-  println!("Tensor = {}", tensor_name);
   let n_dims = gguf_reader.read_u32().await?;
-  println!("n_dims = {}", n_dims);
   let mut dims = Vec::with_capacity(n_dims.try_into().unwrap());
   for _ in 0..n_dims {
     dims.push(gguf_reader.read_u64().await?);
   }
-  println!("dims = {:?}", dims);
   let dtype = gguf_reader.read_u32().await?;
-  println!("dtype = {}", dtype);
   let offset = gguf_reader.read_u64().await?;
-  println!("offset = {}", offset);
 
   Ok(TensorInfo { name: tensor_name, n_dims, dims, dtype, offset })
 }
@@ -280,9 +268,6 @@ async fn read_tensor(gguf_reader: &mut GgufReader, info: &TensorInfo, tensor_sta
       _ => panic!("Unsupported dtype: {}", info.dtype)
   };
 
-  println!("Loading tensor: {}, dtype={}, offset={}, num_bytes={}, seek_to={}", 
-    info.name, info.dtype, info.offset, num_bytes, tensor_start_position + info.offset);
-
   let data = gguf_reader.read_exact_vec(num_bytes as usize).await?;
 
   let ggml_type = match info.dtype {
@@ -291,10 +276,6 @@ async fn read_tensor(gguf_reader: &mut GgufReader, info: &TensorInfo, tensor_sta
     _ => panic!("Unsupported dtype: {}", info.dtype)
   };
 
-  println!("Loaded tensor: {}, {}", info.name, data.len());
-
-  // Just assume it's Q8_0 for now. We will fill out more dtypes later
-  
   let parsed_data = match info.dtype {
       0 => {
         let f32_data: Vec<f32> = data.chunks(4)
