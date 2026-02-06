@@ -195,7 +195,7 @@ async fn read_kv(count: u64, gguf_reader: &mut GgufReader) -> Result<ModelConfig
     println!("value_type = {}", value_type);
 
     let value = gguf_reader.get_gguf_value(value_type).await?;
-    //println!("{:?}", value);
+    println!("{:?}", value);
 
     if key.as_str() == "general.architecture" {
       if let GgufValue::String(s) = value {
