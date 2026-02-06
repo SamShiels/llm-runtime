@@ -1,9 +1,9 @@
 use std::io::{self, Write};
 
-use crate::tokenizer::Tokenizer;
+use crate::engine::llm;
 
 mod loader;
-mod tokenizer;
+mod engine;
 
 #[tokio::main]
 async fn main() {
@@ -17,13 +17,22 @@ async fn main() {
         },
     };
 
-    let tokeizer = Tokenizer::new(&model);
+    println!("\n=== Model Architecture ===");
+    println!("Architecture: {}", model.config.arch);
+    println!("Context Length: {}", model.config.context_length);
+    println!("Embedding Length: {}", model.config.embedding_length);
+    println!("Total Tensors: {}", model.tensor_info.len());
 
-    print!("Enter text: ");
+    println!("\n=== Tensor Information ===");
+    for (i, info) in model.tensor_info.iter().enumerate() {
+        println!("{}. {} - dims: {:?}", i, info.name, info.dims);
+    }
+
+    print!("\nEnter text: ");
     io::stdout().flush().unwrap();  // Force print before read
-    
+
     let mut input = String::new();
     io::stdin().read_line(&mut input).unwrap();
 
-    tokeizer.tokenize(&input.trim());
+    llm::infer(&model, input);
 }

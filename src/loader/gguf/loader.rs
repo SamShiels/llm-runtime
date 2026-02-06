@@ -107,17 +107,17 @@ pub struct ModelConfig {
 
 #[derive(Debug)]
 pub struct TensorInfo {
-  name: String,
-  n_dims: u32,
-  dims: Vec<u64>,
-  dtype: u32,
-  offset: u64
+  pub name: String,
+  pub n_dims: u32,
+  pub dims: Vec<u64>,
+  pub dtype: u32,
+  pub offset: u64
 }
 
 #[derive(Debug)]
 pub struct Q8_0Block {
-  quantized_samples: [i8; 32],
-  scale: f32,
+  pub quantized_samples: [i8; 32],
+  pub scale: f32,
 }
 
 #[derive(Debug)]
@@ -192,10 +192,10 @@ async fn read_kv(count: u64, gguf_reader: &mut GgufReader) -> Result<ModelConfig
     println!("key = {}", key);
 
     let value_type = gguf_reader.read_u32().await?;
-    println!("value_type = {}", value_type);
+    // println!("value_type = {}", value_type);
 
     let value = gguf_reader.get_gguf_value(value_type).await?;
-    println!("{:?}", value);
+    // println!("{:?}", value);
 
     if key.as_str() == "general.architecture" {
       if let GgufValue::String(s) = value {
