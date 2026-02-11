@@ -1,12 +1,12 @@
-use crate::loader::gguf::loader::Q8_0Block;
+use crate::types::Q8Block;
 
-pub fn dequantize(blocks: &[Q8_0Block]) -> Vec<f32> {
+pub fn dequantize(blocks: &[Q8Block]) -> Vec<f32> {
   let total_elements = blocks.len() * 32;
   let mut dequantized_values: Vec<f32> = Vec::with_capacity(total_elements);
 
   for block in blocks {
     let scale = block.scale;
-    let quantized_values = &block.quantized_samples;
+    let quantized_values = &block.values;
 
     for i in quantized_values {
       let dequantized_value = *i as f32 * scale;
@@ -34,4 +34,22 @@ pub fn matmul_vec(
   }
 
   output
+}
+
+fn mean_sqr_vec(a: &[f32], size: usize) -> f32 {
+  let sum: f32 = a.iter().map(|v| v * v).sum();
+  sum / size as f32
+}
+
+pub fn rms_normalize(input: &[f32], weights: &[f32]) -> Vec<f32> {
+  let mean = mean_sqr_vec(&input, input.len());
+  let rms = f32::sqrt(mean + 1e-6);
+
+  let a_norm = 
+    input.iter()
+    .zip(weights.iter())
+    .map(|(v, w)| v / rms * w)
+    .collect();
+
+  a_norm
 }

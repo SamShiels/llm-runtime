@@ -4,6 +4,7 @@ use crate::engine::llm;
 
 mod loader;
 mod engine;
+pub mod types;  // Common types accessible throughout
 
 #[tokio::main]
 async fn main() {
@@ -21,10 +22,10 @@ async fn main() {
     println!("Architecture: {}", model.config.arch);
     println!("Context Length: {}", model.config.context_length);
     println!("Embedding Length: {}", model.config.embedding_length);
-    println!("Total Tensors: {}", model.tensor_info.len());
+    println!("Total Tensors: {}", model.tensors.len());
 
     println!("\n=== Tensor Information ===");
-    for (i, info) in model.tensor_info.iter().enumerate() {
+    for (i, info) in model.tensors.iter().enumerate() {
         println!("{}. {} - dims: {:?}", i, info.name, info.dims);
     }
 

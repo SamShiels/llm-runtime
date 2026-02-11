@@ -2,22 +2,7 @@ use std::{io::{Error, ErrorKind, SeekFrom}, pin::Pin};
 
 use tokio::{fs::File, io::{AsyncReadExt, AsyncSeekExt}};
 
-#[derive(Debug, Clone)]
-pub enum GgufValue {
-  Uint8(u8),
-  Int8(i8),
-  Uint16(u16),
-  Int16(i16),
-  Uint32(u32),
-  Int32(i32),
-  Float32(f32),
-  Bool(bool),
-  String(String),
-  Array(Vec<GgufValue>),
-  Uint64(u64),
-  Int64(i64),
-  Float64(f64),
-}
+use crate::types::GgufValue;
 
 pub struct GgufReader {
   file: File

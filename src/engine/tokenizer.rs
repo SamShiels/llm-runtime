@@ -3,7 +3,7 @@
 use std::{collections::HashMap, usize};
 use regex::Regex;
 
-use crate::loader::gguf::{loader::Model, reader::GgufValue};
+use crate::types::{GgufValue, Model};
 
 pub struct Tokenizer {
   vocabulary: HashMap<String, u64>,
@@ -15,39 +15,22 @@ pub struct Tokenizer {
 impl Tokenizer {
 
   pub fn new(model: &Model) -> Tokenizer {
-    let tokens_gguf= model.config.metadata.get("tokenizer.ggml.tokens").unwrap();
     let mut vocab = HashMap::new();
-
-    if let GgufValue::Array(token_list) = tokens_gguf {
-      for (i, token) in token_list.iter().enumerate() {
-        if let GgufValue::String(s) = token {
-          vocab.insert(s.clone(), i as u64);
-        }
-      }
+    for (i, token) in model.tokenizer_tokens.iter().enumerate() {
+      vocab.insert(token.clone(), i as u64);
     }
 
-    let merges_gguf= model.config.metadata.get("tokenizer.ggml.merges").unwrap();
     let mut merges = HashMap::new();
+    for (i, merge) in model.tokenizer_merges.iter().enumerate() {
+      let pair: Vec<&str> = merge.split(" ").collect();
 
-    if let GgufValue::Array(merge_list) = merges_gguf {
-      for (i, merge) in merge_list.iter().enumerate() {
-        if let GgufValue::String(s) = merge {
-          let pair: Vec<&str> = s.split(" ").collect();
-
-          merges.insert((pair[0].to_string(), pair[1].to_string()), i);
-        }
-      }
+      merges.insert((pair[0].to_string(), pair[1].to_string()), i);
     }
 
-    let pre_tokenization_gguf = model.config.metadata.get("tokenizer.ggml.pre").unwrap();
-    let pattern_str = if let GgufValue::String(s) = pre_tokenization_gguf {
-        match s.as_str() {
-            "lfm2" | "llama3" => r#"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+"#.to_string(),
-            "gpt2" => r#"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"#.to_string(),
-            _ => s.to_string() // If it's already a regex, use it
-        }
-    } else {
-        panic!("pre-tokenization not a string")
+    let pattern_str = match model.tokenizer_pre.as_str() {
+        "lfm2" | "llama3" => r#"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+"#.to_string(),
+        "gpt2" => r#"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"#.to_string(),
+        _ => model.tokenizer_pre.to_string() // If it's already a regex, use it
     };
 
     let map = get_byte_to_unicode_map();

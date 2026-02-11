@@ -3,75 +3,98 @@ use std::{collections::HashMap, io::{Error, ErrorKind}};
 use tokio::fs::File;
 use half::f16;
 
-use crate::loader::gguf::reader::{GgufReader, GgufValue};
-
-#[derive(Debug)]
-enum GgmlType {
-  GgmlTypeF32     = 0,
-  GgmlTypeF16     = 1,
-  GgmlTypeQ4_0  = 2,
-  GgmlTypeQ4_1    = 3,
-  // GGML_TYPE_Q4_2 = 4, support has been removed
-  // GGML_TYPE_Q4_3 = 5, support has been removed
-  GgmlTypeQ5_0    = 6,
-  GgmlTypeQ5_1    = 7,
-  GgmlTypeQ8_0    = 8,
-  GgmlTypeQ8_1    = 9,
-  GgmlTypeQ2K    = 10,
-  GgmlTypeQ3K    = 11,
-  GgmlTypeQ4K    = 12,
-  GgmlTypeQ5K    = 13,
-  GgmlTypeQ6K    = 14,
-  GgmlTypeQ8K    = 15,
-  GgmlTypeIq2Xxs = 16,
-  GgmlTypeIq2Xs  = 17,
-  GgmlTypeIq3Xxs = 18,
-  GgmlTypeIq1S   = 19,
-  GgmlTypeIq4Nl  = 20,
-  GgmlTypeIq3S   = 21,
-  GgmlTypeIq2S   = 22,
-  GgmlTypeIq4Xs  = 23,
-  GgmlTypeI8      = 24,
-  GgmlTypeI16     = 25,
-  GgmlTypeI32     = 26,
-  GgmlTypeI64     = 27,
-  GgmlTypeF64     = 28,
-  GgmlTypeIq1M   = 29,
-  GgmlTypeBf16    = 30,
-  // GGML_TYPE_Q4_0_4_4 = 31, support has been removed from gguf files
-  // GGML_TYPE_Q4_0_4_8 = 32,
-  // GGML_TYPE_Q4_0_8_8 = 33,
-  GgmlTypeTq1_0   = 34,
-  GgmlTypeTq2_0   = 35,
-  // GGML_TYPE_IQ4_NL_4_4 = 36,
-  // GGML_TYPE_IQ4_NL_4_8 = 37,
-  // GGML_TYPE_IQ4_NL_8_8 = 38,
-  GgmlTypeMxfp4   = 39, // MXFP4 (1 block)
-  GgmlTypeCount   = 40,
-}
+use crate::{loader::gguf::reader::GgufReader, types::GgufValue};
+use super::types::{Header, Model as LoaderModel, ModelConfig, TensorInfo, TensorData as LoaderTensorData, Tensor as LoaderTensor, GgmlType};
+use crate::types::{Q8Block, Model, Config, Tensor, TensorData, EmbeddingMatrix};
+use crate::engine::math;
 
 pub async fn load() -> Result<Model, Error>{
-  // let file_contents = match open_file().await {
-  //   Ok(model) => model,
-  //   Err(err) => {
-  //     print!("failed to open GGUF file: {err}");
-  //   }
-  // }
+  let loader_model = open_file().await?;
 
-  // println!("{:?}", file_contents.tensors);
+  // Convert config
+  let config = Config {
+    arch: loader_model.config.arch,
+    context_length: loader_model.config.context_length,
+    embedding_length: loader_model.config.embedding_length,
+  };
 
-  Ok(open_file().await?)
-}
+  // Convert tensors - tensors and tensor_info are in same order
+  let tensors: Vec<Tensor> = loader_model.tensors.into_iter()
+    .enumerate()
+    .map(|(i, loader_tensor)| {
+      let info = &loader_model.tensor_info[i];
 
-pub struct Header {
-  pub magic: [u8; 4],
-  pub version: u32,
-  pub tensor_count: u64,
-  pub kv_count: u64,
+      // Convert tensor data
+      let data = match loader_tensor.data {
+        LoaderTensorData::Q8_0(blocks) => TensorData::Q8(blocks),
+        LoaderTensorData::F32(values) => TensorData::F32(values),
+      };
+
+      Tensor {
+        name: info.name.clone(),
+        dims: info.dims.clone(),
+        data,
+      }
+    })
+    .collect();
+
+  // Extract tokenizer data from metadata
+  let tokenizer_tokens = loader_model.config.metadata
+    .get("tokenizer.ggml.tokens")
+    .and_then(|v| {
+      if let GgufValue::Array(arr) = v {
+        Some(arr.iter().filter_map(|item| {
+          if let GgufValue::String(s) = item {
+            Some(s.clone())
+          } else {
+            None
+          }
+        }).collect())
+      } else {
+        None
+      }
+    })
+    .unwrap_or_else(Vec::new);
+
+  let tokenizer_merges = loader_model.config.metadata
+    .get("tokenizer.ggml.merges")
+    .and_then(|v| {
+      if let GgufValue::Array(arr) = v {
+        Some(arr.iter().filter_map(|item| {
+          if let GgufValue::String(s) = item {
+            Some(s.clone())
+          } else {
+            None
+          }
+        }).collect())
+      } else {
+        None
+      }
+    })
+    .unwrap_or_else(Vec::new);
+
+  let tokenizer_pre = loader_model.config.metadata
+    .get("tokenizer.ggml.pre")
+    .and_then(|v| {
+      if let GgufValue::String(s) = v {
+        Some(s.clone())
+      } else {
+        None
+      }
+    })
+    .unwrap_or_else(|| String::new());
+
+  Ok(Model {
+    config,
+    tensors,
+    tokenizer_tokens,
+    tokenizer_merges,
+    tokenizer_pre,
+    embedding: loader_model.embedding,
+  })
 }
 
 impl Header {
-  
   pub async fn new(reader: &mut GgufReader) -> Result<Self, Error> {
     let magic_vec = reader.read_exact_vec(4).await?;
     let magic: [u8; 4] = magic_vec
@@ -90,50 +113,7 @@ impl Header {
   }
 }
 
-pub struct Model {
-  pub header: Header,
-  pub config: ModelConfig,
-  pub tensor_info: Vec<TensorInfo>,
-  pub tensors: Vec<Tensor>
-}
-
-#[derive(Debug)]
-pub struct ModelConfig {
-  pub arch: String,
-  pub context_length: u32,
-  pub embedding_length: u32,
-  pub metadata: HashMap<String, super::reader::GgufValue>
-}
-
-#[derive(Debug)]
-pub struct TensorInfo {
-  pub name: String,
-  pub n_dims: u32,
-  pub dims: Vec<u64>,
-  pub dtype: u32,
-  pub offset: u64
-}
-
-#[derive(Debug)]
-pub struct Q8_0Block {
-  pub quantized_samples: [i8; 32],
-  pub scale: f32,
-}
-
-#[derive(Debug)]
-pub enum TensorData {
-  F32(Vec<f32>),
-  Q8_0(Vec<Q8_0Block>)
-}
-
-#[derive(Debug)]
-pub struct Tensor {
-  ggml_type: GgmlType,
-  dimensions: Vec<u64>,
-  data: TensorData
-}
-
-async fn open_file() -> Result<Model, Error> {
+async fn open_file() -> Result<LoaderModel, Error> {
   let file = File::open("models/LFM2.5-1.2B-Instruct-Q8_0.gguf").await?;
 
   let mut gguf_reader = GgufReader::new(file);
@@ -164,20 +144,41 @@ async fn open_file() -> Result<Model, Error> {
   let file_pointer_movement = tensor_start_position;
   gguf_reader.seek_pointer_absolute(file_pointer_movement).await?;
 
-  let mut tensors: Vec<Tensor> = Vec::new();
+  let mut tensors: Vec<LoaderTensor> = Vec::new();
+  let mut embedding: Option<EmbeddingMatrix> = None;
 
   for i in 0..header.tensor_count {
     let info = &tensor_info[i as usize];
     let tensor = read_tensor(&mut gguf_reader, &info, &tensor_start_position).await?;
 
+    // Extract embedding matrix
+    if info.name == "token_embd.weight" {
+      let embedding_dim = info.dims[0] as usize;
+      let vocab_size = info.dims[1] as usize;
+
+      let data = match &tensor.data {
+        LoaderTensorData::F32(values) => values.clone(),
+        LoaderTensorData::Q8_0(blocks) => math::dequantize(blocks),
+      };
+
+      embedding = Some(EmbeddingMatrix {
+        data,
+        embedding_dim,
+        vocab_size,
+      });
+    }
+
     tensors.push(tensor);
   }
 
-  Ok(Model {
+  let embedding = embedding.ok_or_else(|| Error::new(ErrorKind::InvalidData, "token_embd.weight not found"))?;
+
+  Ok(LoaderModel {
     header,
     config,
     tensor_info,
-    tensors
+    tensors,
+    embedding,
   })
 }
 
@@ -255,7 +256,7 @@ async fn read_tensor_info(gguf_reader: &mut GgufReader) -> Result<TensorInfo, Er
   Ok(TensorInfo { name: tensor_name, n_dims, dims, dtype, offset })
 }
 
-async fn read_tensor(gguf_reader: &mut GgufReader, info: &TensorInfo, tensor_start_position: &u64) -> Result<Tensor, Error> {
+async fn read_tensor(gguf_reader: &mut GgufReader, info: &TensorInfo, tensor_start_position: &u64) -> Result<LoaderTensor, Error> {
   let num_elements: u64 = info.dims.iter().product();
   let _ = gguf_reader.seek_pointer_absolute(tensor_start_position + info.offset).await;
 
@@ -282,10 +283,10 @@ async fn read_tensor(gguf_reader: &mut GgufReader, info: &TensorInfo, tensor_sta
           .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
           .collect();
 
-        TensorData::F32(f32_data)
+        LoaderTensorData::F32(f32_data)
       },
       8 => {
-        let mut blocks: Vec<Q8_0Block> = Vec::new();
+        let mut blocks: Vec<Q8Block> = Vec::new();
         for chunk in data.chunks(34) {
           let mut quantized = [0i8; 32];
 
@@ -295,18 +296,18 @@ async fn read_tensor(gguf_reader: &mut GgufReader, info: &TensorInfo, tensor_sta
           let scale_bytes: [u8; 2] = chunk[32..34].try_into().unwrap();
           let scale = f16::from_le_bytes(scale_bytes).to_f32();
 
-          let block = Q8_0Block {
-            quantized_samples: quantized,
+          let block = Q8Block {
+            values: quantized,
             scale
           };
 
           blocks.push(block);
         }
 
-        TensorData::Q8_0(blocks)
+        LoaderTensorData::Q8_0(blocks)
       },
       _ => panic!("Unsupported dtype: {}", info.dtype)
   };
 
-  Ok(Tensor { ggml_type, dimensions: info.dims.clone(), data: parsed_data })
+  Ok(LoaderTensor { ggml_type, dimensions: info.dims.clone(), data: parsed_data })
 }
