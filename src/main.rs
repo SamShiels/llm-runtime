@@ -22,12 +22,7 @@ async fn main() {
     println!("Architecture: {}", model.config.arch);
     println!("Context Length: {}", model.config.context_length);
     println!("Embedding Length: {}", model.config.embedding_length);
-    println!("Total Tensors: {}", model.tensors.len());
-
-    println!("\n=== Tensor Information ===");
-    for (i, info) in model.tensors.iter().enumerate() {
-        println!("{}. {} - dims: {:?}", i, info.name, info.dims);
-    }
+    println!("Total Layers: {}", model.layers.len());
 
     print!("\nEnter text: ");
     io::stdout().flush().unwrap();  // Force print before read

@@ -1,3 +1,5 @@
+use core::f32;
+
 use crate::types::Q8Block;
 
 pub fn dequantize(blocks: &[Q8Block]) -> Vec<f32> {
@@ -18,17 +20,18 @@ pub fn dequantize(blocks: &[Q8Block]) -> Vec<f32> {
 }
 
 pub fn matmul_vec(
-  a: &[f32],
-  b: &[f32],
-  out_dimensions: usize,
-  in_dimensions: usize
+  matrix: &[f32],
+  vector: &[f32],
 ) -> Vec<f32> {
-  let mut output = vec![0.0; out_dimensions];
+  let in_dim = vector.len();
+  let out_dim = matrix.len() / in_dim;
 
-  for i in 0..out_dimensions {
+  let mut output = vec![0.0; out_dim];
+
+  for i in 0..out_dim {
     let mut sum = 0.0;
-    for j in 0..in_dimensions {
-      sum += a[i * in_dimensions + j] * b[j];
+    for j in 0..in_dim {
+      sum += matrix[i * in_dim + j] * vector[j];
     }
     output[i] = sum;
   }
@@ -52,4 +55,26 @@ pub fn rms_normalize(input: &[f32], weights: &[f32]) -> Vec<f32> {
     .collect();
 
   a_norm
+}
+
+pub fn softmax(scores: &mut Vec<f32>){
+  let max: f32 = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+  let sum: f32 = scores.iter().map(|s| (s - max).exp()).sum();
+
+  for s in scores.iter_mut() {
+    *s = (*s - max).exp() / sum;
+  }
+} 
+
+pub fn sigmoid(x: f32) -> f32 {
+  if x >= 0.0 {
+    1.0 / (1.0 + (-x).exp())
+  } else {
+    let exp_x = x.exp();
+    exp_x / (1.0 + exp_x)
+  }
+}
+
+pub fn swish(x: f32) -> f32 {
+  sigmoid(x) * x
 }

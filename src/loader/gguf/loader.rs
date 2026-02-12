@@ -5,7 +5,7 @@ use half::f16;
 
 use crate::{loader::gguf::reader::GgufReader, types::GgufValue};
 use super::types::{Header, Model as LoaderModel, ModelConfig, TensorInfo, TensorData as LoaderTensorData, Tensor as LoaderTensor, GgmlType};
-use crate::types::{Q8Block, Model, Config, Tensor, TensorData, EmbeddingMatrix};
+use crate::types::{Q8Block, Model, Config, EmbeddingMatrix, AttentionWeights, FfnWeights, LayerType, TransformerLayer};
 use crate::engine::math;
 
 pub async fn load() -> Result<Model, Error>{
@@ -18,25 +18,58 @@ pub async fn load() -> Result<Model, Error>{
     embedding_length: loader_model.config.embedding_length,
   };
 
-  // Convert tensors - tensors and tensor_info are in same order
-  let tensors: Vec<Tensor> = loader_model.tensors.into_iter()
-    .enumerate()
-    .map(|(i, loader_tensor)| {
-      let info = &loader_model.tensor_info[i];
+  // Build a name→f32 map, dequantizing Q8 tensors as needed
+  let mut tensor_map: HashMap<String, Vec<f32>> = HashMap::new();
+  for (info, loader_tensor) in loader_model.tensor_info.iter().zip(loader_model.tensors.iter()) {
+    let data = match &loader_tensor.data {
+      LoaderTensorData::F32(values) => values.clone(),
+      LoaderTensorData::Q8_0(blocks) => math::dequantize(blocks),
+    };
+    tensor_map.insert(info.name.clone(), data);
+  }
 
-      // Convert tensor data
-      let data = match loader_tensor.data {
-        LoaderTensorData::Q8_0(blocks) => TensorData::Q8(blocks),
-        LoaderTensorData::F32(values) => TensorData::F32(values),
-      };
-
-      Tensor {
-        name: info.name.clone(),
-        dims: info.dims.clone(),
-        data,
-      }
+  // Derive number of layers from tensor names (max blk.N.* index + 1)
+  let num_layers = tensor_map.keys()
+    .filter_map(|name| {
+      let rest = name.strip_prefix("blk.")?;
+      let idx_end = rest.find('.')?;
+      rest[..idx_end].parse::<usize>().ok()
     })
-    .collect();
+    .max()
+    .map(|m| m + 1)
+    .unwrap_or(0);
+
+  // Build transformer layers
+  let mut layers: Vec<TransformerLayer> = Vec::with_capacity(num_layers);
+  for i in 0..num_layers {
+    let layer_type = if let Some(q) = tensor_map.remove(&format!("blk.{i}.attn_q.weight")) {
+      LayerType::Attention(AttentionWeights {
+        q,
+        k:      tensor_map.remove(&format!("blk.{i}.attn_k.weight")).unwrap_or_default(),
+        v:      tensor_map.remove(&format!("blk.{i}.attn_v.weight")).unwrap_or_default(),
+        output: tensor_map.remove(&format!("blk.{i}.attn_output.weight")).unwrap_or_default(),
+        norm:   tensor_map.remove(&format!("blk.{i}.attn_norm.weight")).unwrap_or_default(),
+      })
+    } else {
+      // ShortConv layer - placeholder until implemented
+      LayerType::Attention(AttentionWeights {
+        q: Vec::new(), k: Vec::new(), v: Vec::new(), output: Vec::new(),
+        norm: tensor_map.remove(&format!("blk.{i}.attn_norm.weight")).unwrap_or_default(),
+      })
+    };
+
+    let ffn = FfnWeights {
+      gate: tensor_map.remove(&format!("blk.{i}.ffn_gate.weight")).unwrap_or_default(),
+      up:   tensor_map.remove(&format!("blk.{i}.ffn_up.weight")).unwrap_or_default(),
+      down: tensor_map.remove(&format!("blk.{i}.ffn_down.weight")).unwrap_or_default(),
+      norm: tensor_map.remove(&format!("blk.{i}.ffn_norm.weight")).unwrap_or_default(),
+    };
+
+    layers.push(TransformerLayer { layer_type, ffn });
+  }
+
+  let output_norm   = tensor_map.remove("output_norm.weight").unwrap_or_default();
+  let output_weight = tensor_map.remove("output.weight").unwrap_or_default();
 
   // Extract tokenizer data from metadata
   let tokenizer_tokens = loader_model.config.metadata
@@ -86,11 +119,13 @@ pub async fn load() -> Result<Model, Error>{
 
   Ok(Model {
     config,
-    tensors,
+    layers,
     tokenizer_tokens,
     tokenizer_merges,
     tokenizer_pre,
     embedding: loader_model.embedding,
+    output_norm,
+    output_weight
   })
 }
 

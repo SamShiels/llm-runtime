@@ -42,11 +42,42 @@ pub struct Config {
 #[derive(Debug)]
 pub struct Model {
     pub config: Config,
-    pub tensors: Vec<Tensor>,
+    pub layers: Vec<TransformerLayer>,
     pub tokenizer_tokens: Vec<String>,
     pub tokenizer_merges: Vec<String>,
     pub tokenizer_pre: String,
     pub embedding: EmbeddingMatrix,
+    pub output_norm: Vec<f32>,
+    pub output_weight: Vec<f32>
+}
+
+#[derive(Debug)]
+pub struct AttentionWeights {
+    pub q: Vec<f32>,
+    pub k: Vec<f32>,
+    pub v: Vec<f32>,
+    pub output: Vec<f32>,
+    pub norm: Vec<f32>,  // RMSNorm weights before attention
+}
+
+#[derive(Debug)]
+pub struct FfnWeights {
+    pub gate: Vec<f32>,
+    pub up: Vec<f32>,
+    pub down: Vec<f32>,
+    pub norm: Vec<f32>,  // RMSNorm weights before FFN
+}
+
+#[derive(Debug)]
+pub enum LayerType {
+    Attention(AttentionWeights),
+    // ShortConv(ShortConvWeights),  // Later
+}
+
+#[derive(Debug)]
+pub struct TransformerLayer {
+    pub layer_type: LayerType,
+    pub ffn: FfnWeights,
 }
 
 #[derive(Debug, Clone)]
