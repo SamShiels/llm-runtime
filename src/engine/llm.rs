@@ -1,15 +1,37 @@
-use crate::{engine::{kv_cache::KVCache, math::{matmul_vec, rms_normalize, softmax, swish}, tokenizer::Tokenizer}, types::{AttentionWeights, FfnWeights, LayerType, Model}};
+use crate::{engine::{kv_cache::KVCache, math::{matmul_vec, rms_normalize, sigmoid, softmax, swish}, tokenizer::Tokenizer}, types::{AttentionWeights, FfnWeights, LayerType, Model, ShortConvWeights}};
+
+enum LayerState {
+  Attn(KVCache),
+  Conv(Vec<f32>)
+}
 
 pub fn infer(model: &Model, query: String) -> String {
-  let tokeizer = Tokenizer::new(&model);
-  let token_ids = tokeizer.tokenize(&query.trim());
+  let formatted_query = format!(
+      "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", 
+      query.trim()
+  );
 
-  let mut kv_caches: Vec<KVCache> = model.layers.iter()
+  let tokeizer = Tokenizer::new(&model);
+  let mut token_ids = tokeizer.tokenize(&formatted_query);
+
+  token_ids.insert(0, 1);
+
+  let mut layer_states: Vec<LayerState> = model.layers.iter()
     .map(|layer| {
-      let kv_dim = match &layer.layer_type {
-        LayerType::Attention(attn) => attn.k.len() / model.config.embedding_length as usize
-      };
-      KVCache::new(kv_dim, model.config.context_length as usize)
+      match &layer.layer_type {
+        LayerType::Attention(attn) => {
+          let dim = attn.k.len() / model.config.embedding_length as usize;
+          LayerState::Attn(KVCache::new(dim, model.config.context_length as usize))
+        },
+        LayerType::ShortConv(shortconv) => {
+          let half_dim = model.config.embedding_length as usize; 
+          let total_weights = shortconv.conv.len();
+          let kernel_size = total_weights / half_dim; // Usually 3
+          
+          // Buffer needs to hold [kernel_size * half_dim]
+          LayerState::Conv(vec![0.0f32; kernel_size * half_dim])
+        }
+      }
     })
     .collect();
 
@@ -17,11 +39,11 @@ pub fn infer(model: &Model, query: String) -> String {
   for token_id in token_ids {
     current_token = token_id;
 
-    run_transformer(current_token, &model, &mut kv_caches);
+    run_transformer(current_token, &model, &mut layer_states);
   };
 
   loop {
-    let logits = run_transformer(current_token, &model, &mut kv_caches);
+    let logits = run_transformer(current_token, &model, &mut layer_states);
 
     let mut next_token = 0u64;
     let mut best_score = f32::NEG_INFINITY;
@@ -34,7 +56,7 @@ pub fn infer(model: &Model, query: String) -> String {
 
     let next_token_string = model.tokenizer_tokens[next_token as usize].clone();
 
-    println!("{}", next_token_string);
+    println!("{} {}", next_token_string, next_token);
 
     current_token = next_token;
 
@@ -46,21 +68,35 @@ pub fn infer(model: &Model, query: String) -> String {
   query
 }
 
-fn run_transformer(current_token: u64, model: &Model, kv_caches: &mut Vec<KVCache>) -> Vec<f32> {
+fn run_transformer(current_token: u64, model: &Model, kv_caches: &mut Vec<LayerState>) -> Vec<f32> {
   let mut embedding = lookup_embedding(current_token, &model.embedding.data, model.embedding.embedding_dim);
 
+  // println!("Embedding before: {}", embedding[0]);
   for (i, layer) in model.layers.iter().enumerate() {
-    match &layer.layer_type {
-      LayerType::Attention(attn) => {
-        let normed = rms_normalize(&embedding, &attn.norm);
+    match (&layer.layer_type, &mut kv_caches[i]) {
+      (LayerType::Attention(attn_weights), LayerState::Attn(kc_cache)) => {
+          let normed = rms_normalize(&embedding, &attn_weights.norm);
+          // println!("Normed attn: {}", normed[0]);
 
-        let attention_out = attention(&mut kv_caches[i], &attn, &normed);
+          let attention_out = attention( kc_cache, &attn_weights, &normed);
+          // println!("attention out: {}", attention_out[0]);
 
-        embedding = embedding.iter().zip(&attention_out).map(|(a, b)| a + b).collect();
-      }
+          embedding = embedding.iter().zip(&attention_out).map(|(a, b)| a + b).collect();
+        },
+      (LayerType::ShortConv(conv_weights), LayerState::Conv(conv_buffer)) => {
+          let normed = rms_normalize(&embedding, &conv_weights.norm);
+          // println!("Normed conv: {}", normed[0]);
+
+          let conv_out = shortconv(conv_buffer, &conv_weights, &normed);
+          // println!("conv out: {}", conv_out[0]);
+
+          embedding = embedding.iter().zip(&conv_out).map(|(a, b)| a + b).collect();
+        },
+      _ => unreachable!(),
     }
-
+    // println!("Embedding after: {}", embedding[0]);
     let normed = rms_normalize(&embedding, &layer.ffn.norm);
+    // println!("Normed: {}", normed[0]);
 
     let ffn_out = ffn(&layer.ffn, &normed);
 
@@ -117,6 +153,42 @@ fn attention(kv_cache: &mut KVCache, attention_layer: &AttentionWeights, input: 
   }
 
   matmul_vec(&attention_layer.output, &context)
+}
+
+fn shortconv(buffer: &mut Vec<f32>, shortconv_layer: &ShortConvWeights, input: &[f32]) -> Vec<f32> {
+  let projected = matmul_vec(&shortconv_layer.in_proj, input);
+  let dim = projected.len() / 3;
+  let x = &projected[..dim];          // The part to be convolved
+  let gate = &projected[dim..2*dim];  // The gate
+
+  let kernel_size = shortconv_layer.conv.len() / dim;
+
+  // Shift buffer back one time step, dropping the oldest
+  for i in (dim..buffer.len()).rev() {
+    buffer[i] = buffer[i - dim];
+  }
+  // Write current x at front
+  for i in 0..dim {
+    if i > 6143 {
+      println!("{} ", i);
+    }
+    buffer[i] = x[i];
+  }
+
+  // Depthwise conv: each channel c accumulates over kernel_size time steps
+  let mut conv_out = vec![0.0f32; dim];
+  for c in 0..dim {
+    for k in 0..kernel_size {
+      conv_out[c] += buffer[k * dim + c] * shortconv_layer.conv[k * dim + c];
+    }
+  }
+
+  // Sigmoid gating
+  for (out, g) in conv_out.iter_mut().zip(gate.iter()) {
+    *out *= swish(*g);
+  }
+
+  matmul_vec(&shortconv_layer.out_proj, &conv_out)
 }
 
 fn ffn(weights: &FfnWeights, input: &[f32]) -> Vec<f32> {

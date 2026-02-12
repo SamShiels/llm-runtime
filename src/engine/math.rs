@@ -24,6 +24,9 @@ pub fn matmul_vec(
   vector: &[f32],
 ) -> Vec<f32> {
   let in_dim = vector.len();
+  if in_dim == 0 {
+    println!("Trying to divide {} by zero!", matrix.len())
+  }
   let out_dim = matrix.len() / in_dim;
 
   let mut output = vec![0.0; out_dim];

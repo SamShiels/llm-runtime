@@ -31,6 +31,11 @@ async fn main() {
                 println!("Layer {i}: q={} k={} v={} out={} ffn_gate={}",
                     attn.q.len(), attn.k.len(), attn.v.len(), attn.output.len(),
                     layer.ffn.gate.len());
+            },
+            LayerType::ShortConv(conv) => {
+                println!("Layer {i} (shortconv): in_proj={} conv={} out_proj={} ffn_gate={}",
+                    conv.in_proj.len(), conv.conv.len(), conv.out_proj.len(),
+                    layer.ffn.gate.len());
             }
         }
     }

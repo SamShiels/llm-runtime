@@ -3,7 +3,7 @@ use std::{collections::HashMap, io::{Error, ErrorKind}};
 use tokio::fs::File;
 use half::f16;
 
-use crate::{loader::gguf::reader::GgufReader, types::GgufValue};
+use crate::{loader::gguf::reader::GgufReader, types::{GgufValue, ShortConvWeights}};
 use super::types::{Header, Model as LoaderModel, ModelConfig, TensorInfo, TensorData as LoaderTensorData, Tensor as LoaderTensor, GgmlType};
 use crate::types::{Q8Block, Model, Config, EmbeddingMatrix, AttentionWeights, FfnWeights, LayerType, TransformerLayer};
 use crate::engine::math;
@@ -50,6 +50,13 @@ pub async fn load() -> Result<Model, Error>{
         output: tensor_map.remove(&format!("blk.{i}.attn_output.weight")).unwrap_or_default(),
         norm:   tensor_map.remove(&format!("blk.{i}.attn_norm.weight")).unwrap_or_default(),
       })
+    } else if let Some(conv) = tensor_map.remove(&format!("blk.{i}.shortconv.conv.weight"))  {
+      LayerType::ShortConv(ShortConvWeights {
+        conv,
+        in_proj:  tensor_map.remove(&format!("blk.{i}.shortconv.in_proj.weight")).unwrap_or_default(),
+        out_proj: tensor_map.remove(&format!("blk.{i}.shortconv.out_proj.weight")).unwrap_or_default(),
+        norm:     tensor_map.remove(&format!("blk.{i}.attn_norm.weight")).unwrap_or_default(),
+      })
     } else {
       // ShortConv layer - placeholder until implemented
       LayerType::Attention(AttentionWeights {
@@ -68,8 +75,16 @@ pub async fn load() -> Result<Model, Error>{
     layers.push(TransformerLayer { layer_type, ffn });
   }
 
-  let output_norm   = tensor_map.remove("output_norm.weight").unwrap_or_default();
-  let output_weight = tensor_map.remove("output.weight").unwrap_or_default();
+  let output_norm = tensor_map.remove("output_norm.weight")
+      .or_else(|| tensor_map.remove("norm.weight"))
+      .or_else(|| tensor_map.remove("token_embd_norm.weight")) // <--- THE FIX
+      .expect("Critical: Could not find any final normalization tensor!");
+
+  // 3. Get the Output Head (Map 'token_embd' to 'output_weight')
+  // If 'output.weight' or 'lm_head.weight' is missing, CLONE the embedding weights.
+  let output_weight = tensor_map.remove("output.weight")
+      .or_else(|| tensor_map.remove("lm_head.weight"))
+      .unwrap_or_else(|| loader_model.embedding.data.clone()); // <--- THE FIX (Weight Tying)
 
   let eos_token_id = loader_model.config.metadata
     .get("tokenizer.ggml.eos_token_id")
@@ -188,11 +203,16 @@ async fn open_file() -> Result<LoaderModel, Error> {
     })
     .unwrap_or(32);
 
+  let mut current_pos = gguf_reader.get_position().await?;
+  while current_pos % alignment != 0 {
+      gguf_reader.read_u8().await?; // Discard padding byte
+      current_pos += 1;
+  }
+  
+  let tensor_start_position = current_pos;
+
   // Move the file pointer to the nearest 32-byte position ahead of where we are now
-  let file_position = gguf_reader.get_position().await?;
-  let tensor_start_position = ((file_position as f64 / alignment as f64).ceil() * alignment as f64) as u64;
-  let file_pointer_movement = tensor_start_position;
-  gguf_reader.seek_pointer_absolute(file_pointer_movement).await?;
+  gguf_reader.seek_pointer_absolute(tensor_start_position).await?;
 
   let mut tensors: Vec<LoaderTensor> = Vec::new();
   let mut embedding: Option<EmbeddingMatrix> = None;
@@ -310,6 +330,7 @@ async fn read_tensor(gguf_reader: &mut GgufReader, info: &TensorInfo, tensor_sta
   let num_elements: u64 = info.dims.iter().product();
   let _ = gguf_reader.seek_pointer_absolute(tensor_start_position + info.offset).await;
 
+  println!("{}", info.dtype);
   let num_bytes = match info.dtype {
       0 => num_elements * 4,
       8 => {
@@ -340,10 +361,11 @@ async fn read_tensor(gguf_reader: &mut GgufReader, info: &TensorInfo, tensor_sta
         for chunk in data.chunks(34) {
           let mut quantized = [0i8; 32];
 
-          for (i, &byte) in chunk[0..32].iter().enumerate() {
+          let scale_bytes: [u8; 2] = chunk[0..2].try_into().unwrap();
+          for (i, &byte) in chunk[2..34].iter().enumerate() {
             quantized[i] = byte as i8;
           }
-          let scale_bytes: [u8; 2] = chunk[32..34].try_into().unwrap();
+
           let scale = f16::from_le_bytes(scale_bytes).to_f32();
 
           let block = Q8Block {

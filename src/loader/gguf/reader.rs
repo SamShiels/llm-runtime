@@ -19,6 +19,12 @@ impl GgufReader {
     self.file.stream_position().await
   }
 
+  pub async fn read_u8(&mut self) -> Result<u8, Error> {
+    let mut buffer = [0u8; 1];
+    self.file.read_exact(&mut buffer).await?;
+    Ok(u8::from_le_bytes(buffer))
+  }
+
   pub async fn read_f32(&mut self) -> Result<f32, Error> {
     let mut buffer = [0u8; 4];
     self.file.read_exact(&mut buffer).await?;

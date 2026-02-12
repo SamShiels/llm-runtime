@@ -62,6 +62,14 @@ pub struct AttentionWeights {
 }
 
 #[derive(Debug)]
+pub struct ShortConvWeights {
+    pub in_proj: Vec<f32>,
+    pub conv: Vec<f32>,
+    pub out_proj: Vec<f32>,
+    pub norm: Vec<f32>,  // RMSNorm weights before shortconv (blk.N.attn_norm.weight)
+}
+
+#[derive(Debug)]
 pub struct FfnWeights {
     pub gate: Vec<f32>,
     pub up: Vec<f32>,
@@ -72,7 +80,7 @@ pub struct FfnWeights {
 #[derive(Debug)]
 pub enum LayerType {
     Attention(AttentionWeights),
-    // ShortConv(ShortConvWeights),  // Later
+    ShortConv(ShortConvWeights),  // Later
 }
 
 #[derive(Debug)]
