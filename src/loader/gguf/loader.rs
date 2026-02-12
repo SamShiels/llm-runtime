@@ -71,6 +71,15 @@ pub async fn load() -> Result<Model, Error>{
   let output_norm   = tensor_map.remove("output_norm.weight").unwrap_or_default();
   let output_weight = tensor_map.remove("output.weight").unwrap_or_default();
 
+  let eos_token_id = loader_model.config.metadata
+    .get("tokenizer.ggml.eos_token_id")
+    .and_then(|v| match v {
+      GgufValue::Uint32(id) => Some(*id as u64),
+      GgufValue::Uint64(id) => Some(*id),
+      _ => None,
+    })
+    .unwrap_or(2);
+
   // Extract tokenizer data from metadata
   let tokenizer_tokens = loader_model.config.metadata
     .get("tokenizer.ggml.tokens")
@@ -125,7 +134,8 @@ pub async fn load() -> Result<Model, Error>{
     tokenizer_pre,
     embedding: loader_model.embedding,
     output_norm,
-    output_weight
+    output_weight,
+    eos_token_id,
   })
 }
 
@@ -165,6 +175,11 @@ async fn open_file() -> Result<LoaderModel, Error> {
   for _ in 0..header.tensor_count {
     let info = read_tensor_info(&mut gguf_reader).await?;
     tensor_info.push(info);
+  }
+
+  println!("\n=== Tensor Names ===");
+  for info in &tensor_info {
+    println!("  {}", info.name);
   }
 
   let alignment = config.metadata.get("general.alignment")

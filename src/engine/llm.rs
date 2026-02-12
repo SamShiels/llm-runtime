@@ -1,4 +1,4 @@
-use crate::{engine::{kv_cache::KVCache, math::{matmul_vec, rms_normalize, sigmoid, softmax, swish}, tokenizer::Tokenizer}, types::{AttentionWeights, FfnWeights, LayerType, Model}};
+use crate::{engine::{kv_cache::KVCache, math::{matmul_vec, rms_normalize, softmax, swish}, tokenizer::Tokenizer}, types::{AttentionWeights, FfnWeights, LayerType, Model}};
 
 pub fn infer(model: &Model, query: String) -> String {
   let tokeizer = Tokenizer::new(&model);
@@ -7,47 +7,71 @@ pub fn infer(model: &Model, query: String) -> String {
   let mut kv_caches: Vec<KVCache> = model.layers.iter()
     .map(|layer| {
       let kv_dim = match &layer.layer_type {
-          LayerType::Attention(attn) => attn.k.len() / model.config.embedding_length as usize
+        LayerType::Attention(attn) => attn.k.len() / model.config.embedding_length as usize
       };
       KVCache::new(kv_dim, model.config.context_length as usize)
     })
     .collect();
 
+  let mut current_token = 0u64;
   for token_id in token_ids {
-    let mut embedding = lookup_embedding(token_id, &model.embedding.data, model.embedding.embedding_dim);
+    current_token = token_id;
 
-    for (i, layer) in model.layers.iter().enumerate() {
-      match &layer.layer_type {
-        LayerType::Attention(attn) => {
-          let normed = rms_normalize(&embedding, &attn.norm);
+    run_transformer(current_token, &model, &mut kv_caches);
+  };
 
-          let attention_out = attention(&mut kv_caches[i], &attn, &normed);
+  loop {
+    let logits = run_transformer(current_token, &model, &mut kv_caches);
 
-          embedding = embedding.iter().zip(&attention_out).map(|(a, b)| a + b).collect();
-        }
-      }
-
-      let normed = rms_normalize(&embedding, &layer.ffn.norm);
-
-      let ffn_out = ffn(&layer.ffn, &normed);
-
-      embedding = embedding.iter().zip(&ffn_out).map(|(a, b)| a + b).collect();
-    }
-
-    let normed = rms_normalize(&embedding, &model.output_norm);
-    let logits = matmul_vec(&model.output_weight, &normed);
-
-    let mut best_id = 0u64;
+    let mut next_token = 0u64;
     let mut best_score = f32::NEG_INFINITY;
     for (i, &score) in logits.iter().enumerate() {
       if score > best_score {
         best_score = score;
-        best_id = i as u64;
+        next_token = i as u64;
       }
     }
-  };
+
+    let next_token_string = model.tokenizer_tokens[next_token as usize].clone();
+
+    println!("{}", next_token_string);
+
+    current_token = next_token;
+
+    if next_token == model.eos_token_id { 
+      break; 
+    }
+  }
 
   query
+}
+
+fn run_transformer(current_token: u64, model: &Model, kv_caches: &mut Vec<KVCache>) -> Vec<f32> {
+  let mut embedding = lookup_embedding(current_token, &model.embedding.data, model.embedding.embedding_dim);
+
+  for (i, layer) in model.layers.iter().enumerate() {
+    match &layer.layer_type {
+      LayerType::Attention(attn) => {
+        let normed = rms_normalize(&embedding, &attn.norm);
+
+        let attention_out = attention(&mut kv_caches[i], &attn, &normed);
+
+        embedding = embedding.iter().zip(&attention_out).map(|(a, b)| a + b).collect();
+      }
+    }
+
+    let normed = rms_normalize(&embedding, &layer.ffn.norm);
+
+    let ffn_out = ffn(&layer.ffn, &normed);
+
+    embedding = embedding.iter().zip(&ffn_out).map(|(a, b)| a + b).collect();
+  }
+
+  let normed = rms_normalize(&embedding, &model.output_norm);
+  let logits = matmul_vec(&model.output_weight, &normed);
+
+
+  logits
 }
 
 fn lookup_embedding(token_id: u64, embedding_matrix: &Vec<f32>, embed_dim: usize) -> Vec<f32> {

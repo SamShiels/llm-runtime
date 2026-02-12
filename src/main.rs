@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use crate::engine::llm;
+use crate::{engine::llm, types::LayerType};
 
 mod loader;
 mod engine;
@@ -23,6 +23,17 @@ async fn main() {
     println!("Context Length: {}", model.config.context_length);
     println!("Embedding Length: {}", model.config.embedding_length);
     println!("Total Layers: {}", model.layers.len());
+
+    println!("\n=== Layer Weights ===");
+    for (i, layer) in model.layers.iter().enumerate() {
+        match &layer.layer_type {
+            LayerType::Attention(attn) => {
+                println!("Layer {i}: q={} k={} v={} out={} ffn_gate={}",
+                    attn.q.len(), attn.k.len(), attn.v.len(), attn.output.len(),
+                    layer.ffn.gate.len());
+            }
+        }
+    }
 
     print!("\nEnter text: ");
     io::stdout().flush().unwrap();  // Force print before read

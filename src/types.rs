@@ -48,7 +48,8 @@ pub struct Model {
     pub tokenizer_pre: String,
     pub embedding: EmbeddingMatrix,
     pub output_norm: Vec<f32>,
-    pub output_weight: Vec<f32>
+    pub output_weight: Vec<f32>,
+    pub eos_token_id: u64,
 }
 
 #[derive(Debug)]
