@@ -67,6 +67,8 @@ pub struct ModelConfig {
   pub arch: String,
   pub context_length: u32,
   pub embedding_length: u32,
+  pub head_count: u32,
+  pub head_count_kv: u32,
   pub metadata: HashMap<String, GgufValue>
 }
 

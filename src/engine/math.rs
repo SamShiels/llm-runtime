@@ -81,3 +81,16 @@ pub fn sigmoid(x: f32) -> f32 {
 pub fn swish(x: f32) -> f32 {
   sigmoid(x) * x
 }
+
+pub fn rope_rotate(v: &mut [f32], pos: usize) {
+  let head_size = v.len();
+  for i in 0..head_size / 2 {
+    let freq = 1.0 / (500_000.0f32.powf(2.0 * i as f32 / head_size as f32));
+    let angle = pos as f32 * freq;
+    let (sin, cos) = angle.sin_cos();
+    let v0 = v[2 * i];
+    let v1 = v[2 * i + 1];
+    v[2 * i]     = v0 * cos - v1 * sin;
+    v[2 * i + 1] = v0 * sin + v1 * cos;
+  }
+}

@@ -1,4 +1,4 @@
-use crate::{engine::{kv_cache::KVCache, math::{matmul_vec, rms_normalize, sigmoid, softmax, swish}, tokenizer::Tokenizer}, types::{AttentionWeights, FfnWeights, LayerType, Model, ShortConvWeights}};
+use crate::{engine::{kv_cache::KVCache, math::{matmul_vec, rms_normalize, sigmoid, softmax, swish, rope_rotate}, tokenizer::Tokenizer}, types::{AttentionWeights, FfnWeights, LayerType, Model, ShortConvWeights}};
 
 enum LayerState {
   Attn(KVCache),
@@ -19,9 +19,9 @@ pub fn infer(model: &Model, query: String) -> String {
   let mut layer_states: Vec<LayerState> = model.layers.iter()
     .map(|layer| {
       match &layer.layer_type {
-        LayerType::Attention(attn) => {
-          let dim = attn.k.len() / model.config.embedding_length as usize;
-          LayerState::Attn(KVCache::new(dim, model.config.context_length as usize))
+        LayerType::Attention(_) => {
+          let head_dim = model.config.embedding_length as usize / model.config.head_count as usize;
+          LayerState::Attn(KVCache::new(head_dim, model.config.head_count_kv as usize, model.config.context_length as usize))
         },
         LayerType::ShortConv(shortconv) => {
           let half_dim = model.config.embedding_length as usize; 
@@ -71,14 +71,17 @@ pub fn infer(model: &Model, query: String) -> String {
 fn run_transformer(current_token: u64, model: &Model, kv_caches: &mut Vec<LayerState>) -> Vec<f32> {
   let mut embedding = lookup_embedding(current_token, &model.embedding.data, model.embedding.embedding_dim);
 
+  let n_heads = model.config.head_count as usize;
+  let head_dims = model.embedding.embedding_dim / n_heads;
+
   // println!("Embedding before: {}", embedding[0]);
   for (i, layer) in model.layers.iter().enumerate() {
     match (&layer.layer_type, &mut kv_caches[i]) {
-      (LayerType::Attention(attn_weights), LayerState::Attn(kc_cache)) => {
+      (LayerType::Attention(attn_weights), LayerState::Attn(kv_cache)) => {
           let normed = rms_normalize(&embedding, &attn_weights.norm);
           // println!("Normed attn: {}", normed[0]);
 
-          let attention_out = attention( kc_cache, &attn_weights, &normed);
+          let attention_out = attention(kv_cache, &attn_weights, &normed, head_dims, n_heads, model.config.head_count_kv as usize);
           // println!("attention out: {}", attention_out[0]);
 
           embedding = embedding.iter().zip(&attention_out).map(|(a, b)| a + b).collect();
@@ -117,7 +120,8 @@ fn lookup_embedding(token_id: u64, embedding_matrix: &Vec<f32>, embed_dim: usize
   embedding_matrix[start..end].to_vec()
 }
 
-fn attention(kv_cache: &mut KVCache, attention_layer: &AttentionWeights, input: &[f32]) -> Vec<f32> {
+fn attention(kv_cache: &mut KVCache, attention_layer: &AttentionWeights, input: &[f32], head_size: usize, n_heads: usize, n_kv_heads: usize) -> Vec<f32> {
+
   let q = matmul_vec(
     &attention_layer.q,
     input);
@@ -130,29 +134,47 @@ fn attention(kv_cache: &mut KVCache, attention_layer: &AttentionWeights, input: 
     &attention_layer.v,
     input);
 
-  kv_cache.append_k(&k);
-  kv_cache.append_v(&v);
-
-  let dim = *kv_cache.dim();
-
-  let mut scores: Vec<f32> = Vec::with_capacity(dim);
-
-  for k in kv_cache.keys().chunks(dim) {
-    let dot: f32 = q.iter().zip(k).map(|(a, b)| a * b).sum();
-    let scale = 1.0 / (dim as f32).sqrt();
-    scores.push(dot * scale);
+  // Write each KV head into the cache once
+  for kv_h in 0..n_kv_heads {
+    let mut k_head = k[kv_h * head_size..(kv_h + 1) * head_size].to_vec();
+    rope_rotate(&mut k_head, kv_cache.current_token_idx);
+    kv_cache.append_k_at(kv_h, &k_head);
+    kv_cache.append_v_at(kv_h, &v[kv_h * head_size..(kv_h + 1) * head_size]);
   }
 
-  softmax(&mut scores);
+  let mut all_heads_context = vec![0.0; input.len()];
 
-  let mut context = vec![0.0f32; dim];
-  for (score, v) in scores.iter().zip(kv_cache.values().chunks(dim)) {
-    for (c, vi) in context.iter_mut().zip(v.iter()) {
-      *c += score * vi;
+  // Compute attention for each Q head, mapping to its KV head (GQA)
+  for h in 0..n_heads {
+    let kv_h = h * n_kv_heads / n_heads;
+
+    let mut q_head = q[h * head_size..(h + 1) * head_size].to_vec();
+    rope_rotate(&mut q_head, kv_cache.current_token_idx);
+
+    let k_history = kv_cache.get_k_history(kv_h);
+    let v_history = kv_cache.get_v_history(kv_h);
+
+    let mut scores: Vec<f32> = Vec::new();
+    for k_past in k_history.chunks(head_size) {
+      let dot: f32 = q_head.iter().zip(k_past).map(|(a, b)| a * b).sum();
+      scores.push(dot / (head_size as f32).sqrt());
     }
+
+    softmax(&mut scores);
+
+    let mut head_context = vec![0.0; head_size];
+    for (score, v_past) in scores.iter().zip(v_history.chunks(head_size)) {
+      for (i, val) in v_past.iter().enumerate() {
+        head_context[i] += score * val;
+      }
+    }
+
+    all_heads_context[h * head_size..(h + 1) * head_size].copy_from_slice(&head_context);
   }
 
-  matmul_vec(&attention_layer.output, &context)
+  kv_cache.current_token_idx += 1;
+
+  matmul_vec(&attention_layer.output, &all_heads_context)
 }
 
 fn shortconv(buffer: &mut Vec<f32>, shortconv_layer: &ShortConvWeights, input: &[f32]) -> Vec<f32> {
@@ -169,9 +191,6 @@ fn shortconv(buffer: &mut Vec<f32>, shortconv_layer: &ShortConvWeights, input: &
   }
   // Write current x at front
   for i in 0..dim {
-    if i > 6143 {
-      println!("{} ", i);
-    }
     buffer[i] = x[i];
   }
 

@@ -16,6 +16,8 @@ pub async fn load() -> Result<Model, Error>{
     arch: loader_model.config.arch,
     context_length: loader_model.config.context_length,
     embedding_length: loader_model.config.embedding_length,
+    head_count: loader_model.config.head_count,
+    head_count_kv: loader_model.config.head_count_kv,
   };
 
   // Build a name→f32 map, dequantizing Q8 tensors as needed
@@ -252,10 +254,27 @@ async fn open_file() -> Result<LoaderModel, Error> {
   })
 }
 
+fn gguf_uint_or_max_array(value: &GgufValue) -> Option<u32> {
+  match value {
+    GgufValue::Uint32(i) => Some(*i),
+    GgufValue::Uint64(i) => Some(*i as u32),
+    GgufValue::Int32(i)  => Some(*i as u32),
+    GgufValue::Array(arr) => arr.iter().filter_map(|v| match v {
+      GgufValue::Uint32(i) => Some(*i),
+      GgufValue::Uint64(i) => Some(*i as u32),
+      GgufValue::Int32(i)  => Some(*i as u32),
+      _ => None,
+    }).max(),
+    _ => None,
+  }
+}
+
 async fn read_kv(count: u64, gguf_reader: &mut GgufReader) -> Result<ModelConfig, Error> {
   let mut arch: Option<String> = None;
   let mut context_length: Option<u32> = None;
   let mut embedding_length: Option<u32> = None;
+  let mut head_count: Option<u32> = None;
+  let mut head_count_kv: Option<u32> = None;
   let mut metadata: HashMap<String, GgufValue> = HashMap::new();
 
   for _ in 0..count {    
@@ -292,6 +311,14 @@ async fn read_kv(count: u64, gguf_reader: &mut GgufReader) -> Result<ModelConfig
         } else {
           return Err(Error::new(ErrorKind::InvalidData, "embedding_length not 4 bytes"));
         }
+      } else if key == format!("{arch_name}.attention.head_count") {
+        head_count = Some(gguf_uint_or_max_array(&value)
+          .ok_or_else(|| Error::new(ErrorKind::InvalidData, "attention.head_count unreadable"))?);
+        continue;
+      } else if key == format!("{arch_name}.attention.head_count_kv") {
+        head_count_kv = Some(gguf_uint_or_max_array(&value)
+          .ok_or_else(|| Error::new(ErrorKind::InvalidData, "attention.head_count_kv unreadable"))?);
+        continue;
       }
     }
     metadata.insert(key.clone(), value);
@@ -301,11 +328,15 @@ async fn read_kv(count: u64, gguf_reader: &mut GgufReader) -> Result<ModelConfig
   let arch = arch.ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing general.architecture"))?;
   let context_length = context_length.ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing (arch).context_length"))?;
   let embedding_length = embedding_length.ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing (arch).embedding_length"))?;
+  let head_count = head_count.ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing (arch).attention.head_count"))?;
+  let head_count_kv = head_count_kv.ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing (arch).attention.head_count_kv"))?;
 
   let config = ModelConfig {
     arch,
     context_length,
     embedding_length,
+    head_count,
+    head_count_kv,
     metadata
   };
 
