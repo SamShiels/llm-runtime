@@ -38,6 +38,7 @@ pub struct Config {
     pub embedding_length: u32,
     pub head_count: u32,
     pub head_count_kv: u32,
+    pub rope_freq_base: f32,
 }
 
 /// Complete model with all tensors
@@ -46,6 +47,7 @@ pub struct Model {
     pub config: Config,
     pub layers: Vec<TransformerLayer>,
     pub tokenizer_tokens: Vec<String>,
+    pub tokenizer_token_types: Vec<i32>,
     pub tokenizer_merges: Vec<String>,
     pub tokenizer_pre: String,
     pub embedding: EmbeddingMatrix,

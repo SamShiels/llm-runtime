@@ -69,6 +69,7 @@ pub struct ModelConfig {
   pub embedding_length: u32,
   pub head_count: u32,
   pub head_count_kv: u32,
+  pub rope_freq_base: f32,
   pub metadata: HashMap<String, GgufValue>
 }
 

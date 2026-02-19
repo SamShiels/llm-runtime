@@ -18,6 +18,7 @@ pub async fn load() -> Result<Model, Error>{
     embedding_length: loader_model.config.embedding_length,
     head_count: loader_model.config.head_count,
     head_count_kv: loader_model.config.head_count_kv,
+    rope_freq_base: loader_model.config.rope_freq_base,
   };
 
   // Build a name→f32 map, dequantizing Q8 tensors as needed
@@ -115,6 +116,23 @@ pub async fn load() -> Result<Model, Error>{
     })
     .unwrap_or_else(Vec::new);
 
+  let tokenizer_token_types = loader_model.config.metadata
+    .get("tokenizer.ggml.token_type")
+    .and_then(|v| {
+      if let GgufValue::Array(arr) = v {
+        Some(arr.iter().filter_map(|item| {
+          match item {
+            GgufValue::Int32(t) => Some(*t),
+            GgufValue::Uint32(t) => Some(*t as i32),
+            _ => None,
+          }
+        }).collect())
+      } else {
+        None
+      }
+    })
+    .unwrap_or_else(Vec::new);
+
   let tokenizer_merges = loader_model.config.metadata
     .get("tokenizer.ggml.merges")
     .and_then(|v| {
@@ -147,6 +165,7 @@ pub async fn load() -> Result<Model, Error>{
     config,
     layers,
     tokenizer_tokens,
+    tokenizer_token_types,
     tokenizer_merges,
     tokenizer_pre,
     embedding: loader_model.embedding,
@@ -176,7 +195,7 @@ impl Header {
 }
 
 async fn open_file() -> Result<LoaderModel, Error> {
-  let file = File::open("models/LFM2.5-1.2B-Instruct-Q8_0.gguf").await?;
+  let file = File::open("models/tinyllama.gguf").await?;
 
   let mut gguf_reader = GgufReader::new(file);
   let header = Header::new(&mut gguf_reader).await?;
@@ -275,6 +294,7 @@ async fn read_kv(count: u64, gguf_reader: &mut GgufReader) -> Result<ModelConfig
   let mut embedding_length: Option<u32> = None;
   let mut head_count: Option<u32> = None;
   let mut head_count_kv: Option<u32> = None;
+  let mut rope_freq_base: f32 = 10000.0;
   let mut metadata: HashMap<String, GgufValue> = HashMap::new();
 
   for _ in 0..count {    
@@ -289,6 +309,7 @@ async fn read_kv(count: u64, gguf_reader: &mut GgufReader) -> Result<ModelConfig
 
     if key.as_str() == "general.architecture" {
       if let GgufValue::String(s) = value {
+        println!("{:?}", s);
         arch = Some(s);
       } else {
         return Err(Error::new(ErrorKind::InvalidData, "general.architecture not a string"));
@@ -319,6 +340,11 @@ async fn read_kv(count: u64, gguf_reader: &mut GgufReader) -> Result<ModelConfig
         head_count_kv = Some(gguf_uint_or_max_array(&value)
           .ok_or_else(|| Error::new(ErrorKind::InvalidData, "attention.head_count_kv unreadable"))?);
         continue;
+      } else if key == format!("{arch_name}.rope.freq_base") || key == format!("{arch_name}.attention.rope.freq_base") {
+        if let GgufValue::Float32(f) = value {
+          rope_freq_base = f;
+          continue;
+        }
       }
     }
     metadata.insert(key.clone(), value);
@@ -337,6 +363,7 @@ async fn read_kv(count: u64, gguf_reader: &mut GgufReader) -> Result<ModelConfig
     embedding_length,
     head_count,
     head_count_kv,
+    rope_freq_base,
     metadata
   };
 
